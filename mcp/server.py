@@ -1,7 +1,9 @@
 """GitPulse — MCP server for workspace-aware git repo scanning, diagnosis, and safe sync."""
 
+import fcntl
 import json
 import os
+import re
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -17,6 +19,7 @@ mcp = FastMCP("gitpulse")
 # ---------------------------------------------------------------------------
 DEFAULT_IGNORE = {"node_modules", ".git", ".cache", "__pycache__", ".venv", "venv", "vendor", ".worktrees", ".gitpulse"}
 LARGE_FILE_THRESHOLD = 10 * 1024 * 1024  # 10 MB
+CACHE_TTL_SECONDS = 300  # 5 minutes
 
 # ---------------------------------------------------------------------------
 # Utilities
@@ -77,7 +80,10 @@ def _audit(ws: Path, entry: dict) -> None:
     entry["timestamp"] = datetime.now(timezone.utc).isoformat()
     log = _gpdir(ws) / "audit" / f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.jsonl"
     with log.open("a") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         f.write(json.dumps(entry) + "\n")
+        f.flush()
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 def _write_cache(ws: Path, name: str, data: Any) -> None:
@@ -85,10 +91,15 @@ def _write_cache(ws: Path, name: str, data: Any) -> None:
     p.write_text(json.dumps(data, indent=2, default=str))
 
 
-def _read_cache(ws: Path, name: str) -> Any | None:
+def _read_cache(ws: Path, name: str, ttl: int = CACHE_TTL_SECONDS) -> Any | None:
     p = _gpdir(ws) / "cache" / f"{name}.json"
     if p.exists():
-        return json.loads(p.read_text())
+        try:
+            if ttl and (time.time() - p.stat().st_mtime) > ttl:
+                return None  # Stale
+            return json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
     return None
 
 
@@ -197,12 +208,14 @@ def _submodules(cwd: Path) -> list[dict]:
     return subs
 
 
-def _find_repos(root: Path, ignore: set[str], found: list[Path] | None = None) -> list[Path]:
+def _find_repos(root: Path, ignore: set[str], found: list[Path] | None = None, _depth: int = 0, max_depth: int | None = None) -> list[Path]:
     if found is None:
         found = []
         # Check if root itself is a repo
         if (root / ".git").exists():
             found.append(root)
+    if max_depth is not None and _depth >= max_depth:
+        return found
     try:
         entries = sorted(root.iterdir())
     except PermissionError:
@@ -216,7 +229,7 @@ def _find_repos(root: Path, ignore: set[str], found: list[Path] | None = None) -
             continue
         if (entry / ".git").exists():
             found.append(entry)
-        _find_repos(entry, ignore, found)
+        _find_repos(entry, ignore, found, _depth + 1, max_depth)
     return found
 
 
@@ -254,7 +267,7 @@ def scan_workspace(
     _ensure_gitignore(ws)
 
     ignore = set(ignore_patterns) if ignore_patterns else set(DEFAULT_IGNORE)
-    repos = _find_repos(ws, ignore)
+    repos = _find_repos(ws, ignore, max_depth=max_depth)
 
     # Identify submodule parents
     sub_parents: dict[str, Path] = {}
@@ -284,8 +297,9 @@ def scan_workspace(
 def diagnose_workspace(
     path: str | None = None,
     use_cache: bool = True,
+    check_remotes: bool = False,
 ) -> dict:
-    """Full health check across all discovered repos: uncommitted changes, ahead/behind, detached HEAD, stale branches, broken remotes, submodule drift, fork drift, large untracked, auth issues."""
+    """Full health check across all discovered repos: uncommitted changes, ahead/behind, detached HEAD, stale branches, broken remotes, submodule drift, fork drift, large untracked, auth issues. Set check_remotes=True to verify remote connectivity (slow, makes network calls per remote)."""
     ws = _ws_root(path)
     cached = _read_cache(ws, "scan") if use_cache else None
     if cached:
@@ -331,12 +345,13 @@ def diagnose_workspace(
             if stale:
                 issues.append({"type": "stale_branches", "severity": "info", "detail": f"{len(stale)} merged branch(es) could be deleted", "branches": stale})
 
-        # 5. Broken remotes
+        # 5. Broken remotes (opt-in, network calls)
         rems = _remotes(rp)
-        for rem in rems:
-            rc2, _, _ = _git(["ls-remote", "--exit-code", rem["name"]], cwd=rp, timeout=10)
-            if rc2 != 0:
-                issues.append({"type": "broken_remote", "severity": "error", "detail": f"Remote '{rem['name']}' ({rem['url']}) unreachable"})
+        if check_remotes:
+            for rem in rems:
+                rc2, _, _ = _git(["ls-remote", "--exit-code", rem["name"]], cwd=rp, timeout=10)
+                if rc2 != 0:
+                    issues.append({"type": "broken_remote", "severity": "error", "detail": f"Remote '{rem['name']}' ({rem['url']}) unreachable"})
 
         # 6. Submodule drift
         for sm in _submodules(rp):
@@ -540,14 +555,19 @@ def pull_repo(
 
         rc, out, err = _git(cmd, cwd=rp, timeout=60)
 
-        # Count changes
+        # Count changes from git output
         files_changed = 0
         commits_pulled = 0
-        if rc == 0 and "file" in (out + err):
-            for token in (out + err).split():
-                if token.isdigit():
-                    files_changed = int(token)
-                    break
+        combined = out + " " + err
+        # Parse "X files changed" pattern
+        fm = re.search(r'(\d+)\s+files?\s+changed', combined)
+        if fm:
+            files_changed = int(fm.group(1))
+        # Count commits by checking shortstat or log
+        if rc == 0 and strategy != "force":
+            rc_c, out_c, _ = _git(["rev-list", "--count", f"{target_branch}@{{1}}..{target_branch}"], cwd=rp)
+            if rc_c == 0 and out_c.strip().isdigit():
+                commits_pulled = int(out_c.strip())
 
         # Pop stash if we stashed
         warnings = []
