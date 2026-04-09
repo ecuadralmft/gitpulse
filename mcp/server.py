@@ -227,7 +227,11 @@ def _find_repos(root: Path, ignore: set[str], found: list[Path] | None = None, _
             continue
         if entry.name == ".git":
             continue
-        if (entry / ".git").exists():
+        try:
+            has_git = (entry / ".git").exists()
+        except PermissionError:
+            continue
+        if has_git:
             found.append(entry)
         _find_repos(entry, ignore, found, _depth + 1, max_depth)
     return found
@@ -260,8 +264,9 @@ def scan_workspace(
     path: str | None = None,
     max_depth: int | None = None,
     ignore_patterns: list[str] | None = None,
+    detail: str = "minimal",
 ) -> dict:
-    """Deep recursive scan to discover all git repos in a workspace, including submodules. Identifies remotes, branches, fork status."""
+    """Deep recursive scan to discover all git repos in a workspace. detail='minimal' returns paths + current branch only (fast). detail='full' includes branches, fork status, submodules (slower, makes gh API calls)."""
     t0 = time.monotonic()
     ws = _ws_root(path)
     _ensure_gitignore(ws)
@@ -269,17 +274,28 @@ def scan_workspace(
     ignore = set(ignore_patterns) if ignore_patterns else set(DEFAULT_IGNORE)
     repos = _find_repos(ws, ignore, max_depth=max_depth)
 
-    # Identify submodule parents
-    sub_parents: dict[str, Path] = {}
-    for rp in repos:
-        for sm in _submodules(rp):
-            sp = (rp / sm["path"]).resolve()
-            sub_parents[str(sp)] = rp
-
     results = []
-    for rp in repos:
-        parent = sub_parents.get(str(rp))
-        results.append(_repo_info(rp, parent))
+    if detail == "minimal":
+        for rp in repos:
+            branch, detached = _current_branch(rp)
+            dirty = bool(_dirty_files(rp))
+            results.append({
+                "path": str(rp),
+                "current_branch": branch,
+                "detached": detached,
+                "dirty": dirty,
+            })
+    else:
+        # Full detail: branches, forks, submodules
+        sub_parents: dict[str, Path] = {}
+        for rp in repos:
+            for sm in _submodules(rp):
+                sp = (rp / sm["path"]).resolve()
+                sub_parents[str(sp)] = rp
+
+        for rp in repos:
+            parent = sub_parents.get(str(rp))
+            results.append(_repo_info(rp, parent))
 
     data = {
         "workspace_root": str(ws),
