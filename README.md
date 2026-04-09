@@ -25,17 +25,43 @@ GitPulse uses `git` and GitHub CLI (`gh`) to give you (and your agents) a comple
 ## Install
 
 ```bash
-git clone https://github.com/ecuadralmft/gitpulse.git
+git clone <this-repo-url>
 cd gitpulse
 ./install.sh
 ```
 
-This will:
+The installer will:
 1. Copy the server to `~/.kiro/mcp/gitpulse/`
-2. Create a Python venv and install dependencies
+2. Create a Python virtual environment and install dependencies
 3. Register GitPulse in `~/.kiro/settings/mcp.json`
 
 Restart Kiro CLI after install.
+
+### Manual Install
+
+If you prefer to set it up yourself:
+
+```bash
+# Copy server files
+mkdir -p ~/.kiro/mcp/gitpulse
+cp mcp/server.py ~/.kiro/mcp/gitpulse/
+cp mcp/requirements.txt ~/.kiro/mcp/gitpulse/
+
+# Create venv and install deps
+python3 -m venv ~/.kiro/mcp/gitpulse/.venv
+~/.kiro/mcp/gitpulse/.venv/bin/pip install -r ~/.kiro/mcp/gitpulse/requirements.txt
+
+# Register in Kiro
+kiro-cli mcp add \
+  --name gitpulse \
+  --scope default \
+  --command ~/.kiro/mcp/gitpulse/.venv/bin/python3 \
+  --args ~/.kiro/mcp/gitpulse/server.py
+```
+
+### Agent Access
+
+To give a Kiro agent access to GitPulse tools, add `"includeMcpJson": true` to its agent config in `~/.kiro/agents/<name>.json`.
 
 ## Tools
 
@@ -68,8 +94,8 @@ GitPulse stores runtime data in `.gitpulse/` at the workspace root (auto-added t
 
 ```
 .gitpulse/
-├── cache/    # Scan and diagnosis caches
-├── audit/    # Operation logs (JSONL, one file per day)
+├── cache/       # Scan and diagnosis caches
+├── audit/       # Operation logs (JSONL, one file per day)
 └── config.json  # User preferences
 ```
 
@@ -83,6 +109,7 @@ gitpulse/
 │   ├── server.py          # MCP server (all 6 tools)
 │   └── requirements.txt   # Python dependencies
 ├── install.sh             # One-command installer
+├── gitpulse-spec.md       # Full PRD / specification
 ├── .gitignore
 └── README.md
 ```
