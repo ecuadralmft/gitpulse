@@ -17,10 +17,17 @@ GitPulse uses `git` and GitHub CLI (`gh`) to give you (and your agents) a comple
 
 ## Prerequisites
 
-- Python 3.10+
-- [git](https://git-scm.com/)
-- [GitHub CLI (`gh`)](https://cli.github.com/) — authenticated via `gh auth login`
-- [Kiro CLI](https://github.com/aws/kiro-cli) (or any MCP client)
+- **Python 3.10+** — [python.org/downloads](https://www.python.org/downloads/)
+- **pip** — included with Python (used by install.sh to install the MCP SDK)
+- **[git](https://git-scm.com/)** — for all local repo operations
+- **[GitHub CLI (`gh`)](https://cli.github.com/)** — for GitHub API operations (fork detection, auth). Must be authenticated: `gh auth login`
+- **[Kiro CLI](https://github.com/aws/kiro-cli)** (or any MCP-compatible client)
+
+### Python Dependencies (auto-installed)
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `mcp[cli]` | ≥1.0.0 | MCP SDK — server framework and stdio transport |
 
 ## Install
 
